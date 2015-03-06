@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Data.SQLite;
 using System.IO;
@@ -12,59 +13,45 @@ using System.Xml.Serialization;
 
 namespace UpdateWatch_Server
 {
-    class Program
+    class ServerThread
     {
-        public const string dataSource = "UpdateWatch.sqlite";
-        static SQLiteConnection connectionTest = new SQLiteConnection();
-
-        static Thread thread;
-
-        private static void deleteUpdates(long hostID, SQLiteConnection connection)
+        // Stop-Flag
+        public bool stop = false;
+        // Flag für "Thread läuft"
+        public bool running = false;
+        // Die Verbindung zum Client
+        private TcpClient connection = null;
+        // Speichert die Verbindung zum Client und startet den Thread
+        public ServerThread(TcpClient connection)
         {
-            SQLiteCommand command = new SQLiteCommand(connection);
-            command.CommandText = "BEGIN;";
-            command.ExecuteNonQuery();
-            command.CommandText = "SELECT * FROM HostUpdates WHERE HostID='" + hostID + "';";
-            SQLiteDataReader reader = command.ExecuteReader();
-            while (reader.Read())
-            {
-                SQLiteCommand deleteCommand = new SQLiteCommand(connection);
-                deleteCommand.CommandText = "DELETE FROM Updates WHERE ID='" + reader["UpdateID"] + "';";
-                deleteCommand.ExecuteNonQuery();
-                deleteCommand.Dispose();
-            }
-            reader.Close();
-            reader.Dispose();
-            command.CommandText = "DELETE FROM HostUpdates WHERE HostID='" + hostID + "';";
-            command.ExecuteNonQuery();
-            command.CommandText = "END;";
-            command.ExecuteNonQuery();
-            command.Dispose();
+            // Speichert die Verbindung zum Client,
+            // um sie später schließen zu können
+            this.connection = connection;
+            // Initialisiert und startet den Thread
+            new Thread(new ThreadStart(Run)).Start();
         }
-
-        private static void listen()
+        // Der eigentliche Thread
+        public void Run()
         {
             UWUpdate.clSendData sendData = new UWUpdate.clSendData();
-            IPAddress ipaddress = new IPAddress(0x00000000L);
             string clientIP;
             long hostID = -1;
 
-            //            SQLiteConnection connection = new SQLiteConnection();
-            //            connection.ConnectionString = "Data Source=" + dataSource;
-            //            connection.Open();
-            SQLiteConnection connection = connectionTest;
-            SQLiteCommand command = new SQLiteCommand(connection);
+            Console.WriteLine("### neuer Thread ###");
 
-            TcpListener listener = new TcpListener(ipaddress, 4584);
-            listener.Start();
-            TcpClient c = listener.AcceptTcpClient();
-            Stream networkStream = c.GetStream();
+            // Setze Flag für "Thread läuft"
+            this.running = true;
+            // Hole den Stream für's schreiben
+            Stream networkStream = this.connection.GetStream();
+
+            SQLiteConnection connection = Program.sqlConnection;
+            SQLiteCommand command = new SQLiteCommand(connection);
 
             XmlSerializer xmlserializer = new XmlSerializer(typeof(UWUpdate.clSendData));
             object obj = xmlserializer.Deserialize(networkStream);
             sendData = (UWUpdate.clSendData)obj;
 
-            String[] tmp = c.Client.RemoteEndPoint.ToString().Split((':'));
+            String[] tmp = this.connection.Client.RemoteEndPoint.ToString().Split((':'));
             if (tmp.Count() == 2)
             {
                 clientIP = tmp[0];
@@ -103,8 +90,10 @@ namespace UpdateWatch_Server
             {
                 long updateID;
 
-                command.CommandText = "INSERT INTO Updates (Title, Description, ReleaseNotes, SupportUrl) VALUES ('" + update.Title + "', '" + update.Description + "', " +
-                    "'" + update.ReleaseNotes + "', '" + update.SupportUrl + "');";
+                command.CommandText = "INSERT INTO Updates (Title, Description, ReleaseNotes, SupportUrl, UpdateID, RevisionNumber, isMandatory, isUninstallable, KBArticleIDs, " +
+                    "MsrcSeverity, Type) VALUES ('" + update.Title + "', '" + update.Description + "', '" + update.ReleaseNotes + "', '" + update.SupportUrl + "', " +
+                    "'" + update.UpdateID + "', '" + update.RevisionNumber + "', '" + update.isMandatory.ToString() + "', '" + update.isUninstallable + "', " +
+                    "'" + update.KBArticleIDs + "', '" + update.MsrcSeverity + "', '" + update.Type + "');";
                 command.ExecuteNonQuery();
                 updateID = connection.LastInsertRowId;
                 command.CommandText = "INSERT INTO HostUpdates (HostID, UpdateID) VALUES ('" + hostID + "', '" + updateID + "');";
@@ -112,9 +101,6 @@ namespace UpdateWatch_Server
             }
 
             command.Dispose();
-
-            connection.Close();
-            connection.Dispose();
 
             Console.WriteLine("dnsName: " + sendData.dnsName);
             Console.WriteLine("IP: " + clientIP);
@@ -126,26 +112,98 @@ namespace UpdateWatch_Server
             foreach (UWUpdate.WUpdate update in sendData.wUpdate)
             {
                 Console.WriteLine("-----------");
+                Console.WriteLine("Title: " + update.Title);
                 Console.WriteLine("Description: " + update.Description);
                 Console.WriteLine("ReleaseNotes: " + update.ReleaseNotes);
                 Console.WriteLine("SupportUrl: " + update.SupportUrl);
-                Console.WriteLine("Title: " + update.Title);
+                Console.WriteLine("UpdateID: " + update.UpdateID);
+                Console.WriteLine("RevisionNumber: " + update.RevisionNumber);
+                Console.WriteLine("isMandatory: " + update.isMandatory);
+                Console.WriteLine("isUninstallable: " + update.isUninstallable);
+                Console.WriteLine("KBArticleIDs: " + update.KBArticleIDs);
+                Console.WriteLine("MsrcSeverity: " + update.MsrcSeverity);
+                Console.WriteLine("Type: " + update.Type);
             }
             Console.WriteLine("");
 
-            //c.Close();
-            //listener.Stop();
+            Console.WriteLine("### Thread beendet ###");
+        }
+
+        private static void deleteUpdates(long hostID, SQLiteConnection connection)
+        {
+            SQLiteCommand command = new SQLiteCommand(connection);
+            command.CommandText = "BEGIN;";
+            command.ExecuteNonQuery();
+            command.CommandText = "SELECT * FROM HostUpdates WHERE HostID='" + hostID + "';";
+            SQLiteDataReader reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                SQLiteCommand deleteCommand = new SQLiteCommand(connection);
+                deleteCommand.CommandText = "DELETE FROM Updates WHERE ID='" + reader["UpdateID"] + "';";
+                deleteCommand.ExecuteNonQuery();
+                deleteCommand.Dispose();
+            }
+            reader.Close();
+            reader.Dispose();
+            command.CommandText = "DELETE FROM HostUpdates WHERE HostID='" + hostID + "';";
+            command.ExecuteNonQuery();
+            command.CommandText = "END;";
+            command.ExecuteNonQuery();
+            command.Dispose();
+        }
+    }
+
+    class Program
+    {
+        private const string dataSource = "C:\\Users\\Schröpel\\Documents\\Visual Studio 2013\\Projects\\UpdateWatch-Server\\UpdateWatch-Server\\bin\\Debug\\UpdateWatch.sqlite";
+        public static SQLiteConnection sqlConnection = new SQLiteConnection();
+        private static ArrayList threads = new ArrayList();
+        private static IPAddress ipaddress = new IPAddress(0x00000000L);
+        private static TcpListener listener = new TcpListener(ipaddress, 4584);
+
+        public static void Run()
+        {
+            while (true)
+            {
+                // Wartet auf eingehenden Verbindungsversuch
+                TcpClient c = listener.AcceptTcpClient();
+                // Initialisiert und startet einen Server-Thread
+                // und fügt ihn zur Liste der Server-Threads hinzu
+                threads.Add(new ServerThread(c));
+            }
         }
 
         static void Main(string[] args)
         {
-            connectionTest.ConnectionString = "Data Source=" + dataSource;
-            connectionTest.Open();
+            // Listener starten
+            listener.Start();
 
-            Thread th = new Thread(new ThreadStart(listen));
-            thread = th;
+            sqlConnection.ConnectionString = "Data Source=" + dataSource;
+            sqlConnection.Open();
 
+            Console.WriteLine("Starting...");
+
+            // Haupt-Server-Thread initialisieren und starten
+            Thread th = new Thread(new ThreadStart(Run));
             th.Start();
+
+            Console.WriteLine("System running; press any key to stop");
+            Console.ReadKey(true);
+
+            th.Abort();
+            for (IEnumerator e = threads.GetEnumerator(); e.MoveNext(); )
+            {
+                ServerThread st = (ServerThread)e.Current;
+                st.stop = true;
+                while (st.running)
+                    Thread.Sleep(1000);
+            }
+            listener.Stop();
+
+            sqlConnection.Close();
+            sqlConnection.Dispose();
+
+            Console.WriteLine("System stopped");
         }
     }
 }
